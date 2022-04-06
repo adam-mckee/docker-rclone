@@ -2,19 +2,26 @@
 
 set -e
 
+function run_commands {
+	COMMANDS=$1
+	while IFS= read -r cmd; do echo $cmd && eval $cmd ; done < <(printf '%s\n' "$COMMANDS")
+}
+
+function run_exit_commands {
+	set +e
+	set +o pipefail
+	run_commands "${POST_COMMANDS_EXIT:-}"
+}
+
+trap run_exit_commands EXIT
+
 echo "INFO: Starting sync.sh pid $$ $(date)"
 
 if [ `lsof | grep $0 | wc -l | tr -d ' '` -gt 1 ]
 then
   echo "WARNING: A previous $RCLONE_CMD is still running. Skipping new $RCLONE_CMD command."
 else
-
-  # Signal start oh sync.sh to healthchecks.io
-  if [ ! -z "$CHECK_URL" ]
-  then
-    echo "INFO: Sending start signal to healthchecks.io"
-    wget $CHECK_URL/start -O /dev/null
-  fi
+  run_commands "${PRE_COMMANDS:-}"
 
   # Delete logs by user request
   if [ ! -z "${ROTATE_LOG##*[!0-9]*}" ]
@@ -82,35 +89,13 @@ else
     fi
   fi
 
-  # Wrap up healthchecks.io call with complete or failure signal
-  if [ -z "$CHECK_URL" ]
-  then
-    echo "INFO: Define CHECK_URL with https://healthchecks.io to monitor $RCLONE_CMD job"
-  else
-    if [ "$RETURN_CODE" == 0 ]
-    then
-      if [ ! -z "$OUTPUT_LOG" ] && [ ! -z "$HC_LOG" ] && [ -f "$LOG_FILE" ]
-      then
-        echo "INFO: Sending complete signal with logs to healthchecks.io"
-        m=$(tail -c 10000 "$LOG_FILE")
-	wget $CHECK_URL -O /dev/null --post-data="$m"
-      else
-	echo "INFO: Sending complete signal to healthchecks.io"
-        wget $CHECK_URL -O /dev/null --post-data="SUCCESS"
-      fi
-    else
-      if [ ! -z "$OUTPUT_LOG" ] && [ ! -z "$HC_LOG" ] && [ -f "$LOG_FILE" ]
-      then
-        echo "INFO: Sending failure signal with logs to healthchecks.io"
-        m=$(tail -c 10000 "$LOG_FILE")
-        wget $FAIL_URL -O /dev/null --post-data="$m"
-      else
-	echo "INFO: Sending failure signal to healthchecks.io"
-        wget $FAIL_URL -O /dev/null --post-data="Check container logs"
-      fi
-    fi
+  if [ $RETURN_CODE -ne 0 ]; then
+    run_commands "${POST_COMMANDS_FAILURE:-}"
+    exit $RETURN_CODE
   fi
 
-rm -f /tmp/sync.pid
+  echo Backup successful
 
+  rm -f /tmp/sync.pid
+  run_commands "${POST_COMMANDS_SUCCESS:-}"
 fi

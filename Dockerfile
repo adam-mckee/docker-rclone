@@ -1,7 +1,7 @@
 ARG BASE=alpine:latest
 FROM ${BASE}
 
-LABEL maintainer="pfidr"
+LABEL maintainer="adam-mckee"
 
 ARG RCLONE_VERSION=current
 ARG ARCH=amd64
@@ -26,8 +26,11 @@ ENV HC_LOG=
 ENV TZ=
 ENV UID=
 ENV GID=
+ENV POST_COMMANDS_FAILURE=
+ENV POST_COMMANDS_SUCCESS=
+ENV POST_COMMANDS_EXIT=
 
-RUN apk --no-cache add ca-certificates fuse wget dcron tzdata
+RUN apk --no-cache add ca-certificates fuse curl dcron tzdata
 
 RUN URL=http://downloads.rclone.org/${RCLONE_VERSION}/rclone-${RCLONE_VERSION}-linux-${ARCH}.zip ; \
   URL=${URL/\/current/} ; \
