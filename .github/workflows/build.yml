@@ -1,0 +1,132 @@
+name: build
+
+# Publishes 5mck/docker-rclone. Previously this image was built by hand, which is
+# how its sync.sh drifted from this repo and how a two-line bug (RETURN_CODE
+# captured after `set -e`) sat in the running container reporting every failed
+# backup as a success.
+#
+# Requires two repository secrets:
+#   DOCKERHUB_USERNAME  - the Docker Hub account that owns 5mck/
+#   DOCKERHUB_TOKEN     - an access token from hub.docker.com/settings/security
+#                         (an access token, NOT the account password)
+
+on:
+  push:
+    branches: [master]
+    paths-ignore: ['**.md', 'LICENSE.md']
+  pull_request:
+    paths-ignore: ['**.md', 'LICENSE.md']
+  workflow_dispatch:
+    inputs:
+      rclone_version:
+        description: 'rclone version to bake in (e.g. v1.58.0, or "current" for latest)'
+        required: false
+        default: ''
+      push_image:
+        description: 'Push to Docker Hub'
+        type: boolean
+        required: false
+        default: true
+
+env:
+  IMAGE: 5mck/docker-rclone
+  # Bump deliberately. The image ran v1.58.0 for years; jumping versions changes
+  # the tool doing the backups, so do it as its own commit where any behaviour
+  # change is attributable rather than mixed in with something else.
+  DEFAULT_RCLONE_VERSION: v1.58.0
+
+jobs:
+  lint:
+    # The bug that prompted this CI was shell-level: `export RETURN_CODE=$?`
+    # placed after `set -e`, plus `set e+` / `set e-` typos that silently set the
+    # positional parameters instead of toggling errexit. Lint the scripts so that
+    # class of defect is caught before it reaches a backup job.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        uses: ludeeus/action-shellcheck@master
+        with:
+          scandir: '.'
+          severity: warning
+        continue-on-error: true   # advisory for now; tighten once the backlog is clear
+
+  build:
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve rclone version
+        id: ver
+        run: |
+          v="${{ github.event.inputs.rclone_version }}"
+          [ -z "$v" ] && v="${DEFAULT_RCLONE_VERSION}"
+          echo "value=$v" >> "$GITHUB_OUTPUT"
+          echo "Building with rclone $v"
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Only log in when we actually intend to push. Pull requests build and are
+      # thrown away, which validates the Dockerfile without needing credentials
+      # or publishing anything from an unmerged branch.
+      - name: Log in to Docker Hub
+        if: github.event_name != 'pull_request' && github.event.inputs.push_image != 'false'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          # amd64 only: the sole consumer is the nas (Celeron J3455, x86_64).
+          # To add arm64, the Dockerfile needs to map Docker's TARGETARCH onto
+          # rclone's archive naming rather than the fixed ARG ARCH=amd64.
+          platforms: linux/amd64
+          build-args: |
+            RCLONE_VERSION=${{ steps.ver.outputs.value }}
+            ARCH=amd64
+          push: ${{ github.event_name != 'pull_request' && github.event.inputs.push_image != 'false' }}
+          # Three tags on purpose: `latest` is what the nas pulls, the version tag
+          # records what is inside it, and the sha tag gives an exact rollback
+          # target if a build turns out to break backups.
+          tags: |
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ steps.ver.outputs.value }}
+            ${{ env.IMAGE }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Verify the built image reports failures correctly
+        # Regression test for the bug this repo exists to have fixed: run a sync
+        # that cannot succeed and assert the FAILURE branch fires and the exit
+        # code is non-zero. Cheap, and it fails the build rather than silently
+        # shipping an image that lies about backup outcomes.
+        run: |
+          docker build --build-arg RCLONE_VERSION=${{ steps.ver.outputs.value }} \
+                       --build-arg ARCH=amd64 -t rclone-test:ci .
+          mkdir -p /tmp/src /tmp/dest && echo hello > /tmp/src/f.txt
+          chmod 555 /tmp/dest
+          set +e
+          out=$(docker run --rm \
+            -v /tmp/src:/source:ro -v /tmp/dest:/dest:ro \
+            -e RCLONE_CMD=sync -e SYNC_SRC=/source -e SYNC_DEST=/dest \
+            -e POST_COMMANDS_SUCCESS='echo BRANCH_SUCCESS' \
+            -e POST_COMMANDS_FAILURE='echo BRANCH_FAILURE' \
+            --entrypoint /sync.sh rclone-test:ci 2>&1)
+          rc=$?
+          set -e
+          echo "$out" | tail -5
+          echo "container exit code: $rc"
+          if [ "$rc" -eq 0 ]; then
+            echo "FAIL: a sync that cannot write returned exit 0"; exit 1
+          fi
+          if echo "$out" | grep -q BRANCH_SUCCESS; then
+            echo "FAIL: POST_COMMANDS_SUCCESS fired on a failed sync"; exit 1
+          fi
+          if ! echo "$out" | grep -q BRANCH_FAILURE; then
+            echo "FAIL: POST_COMMANDS_FAILURE did not fire"; exit 1
+          fi
+          echo "OK: failure is reported as failure"

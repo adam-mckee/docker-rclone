@@ -63,9 +63,12 @@ else
       set -e
     fi
   else
-    set e+
+    # `set e+` / `set e-` were typos: those do not toggle errexit at all, they
+    # set the positional parameters to the literal strings "e+" / "e-". Meant to
+    # be +e / -e so a non-zero rclone probe here does not kill the script.
+    set +e
     if test "$(rclone --max-depth $RCLONE_DIR_CMD_DEPTH $RCLONE_DIR_CMD "$(eval echo $SYNC_SRC)" $RCLONE_OPTS)"; then
-    set e-
+    set -e
     echo "INFO: Source directory is not empty and can be processed without clear loss of data"
     if [ ! -z "$OUTPUT_LOG" ]
     then
@@ -81,8 +84,13 @@ else
       echo "INFO: Starting rclone $RCLONE_CMD $SYNC_SRC $SYNC_DEST $RCLONE_OPTS $SYNC_OPTS_ALL"
       set +e
       eval "rclone $RCLONE_CMD $SYNC_SRC $SYNC_DEST $RCLONE_OPTS $SYNC_OPTS_ALL"
-      set -e
+      # Must capture $? BEFORE `set -e`, or it records the exit status of `set`
+      # itself - which is always 0. That made RETURN_CODE unconditionally 0, so
+      # the failure branch below never fired and POST_COMMANDS_SUCCESS ran even
+      # when rclone had failed. The other three rclone branches already had this
+      # in the right order; only this one was transposed.
       export RETURN_CODE=$?
+      set -e
     fi
     else
       echo "WARNING: Source directory is empty. Skipping $RCLONE_CMD command."
