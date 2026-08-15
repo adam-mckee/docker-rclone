@@ -54,6 +54,14 @@ jobs:
   build:
     runs-on: ubuntu-latest
     needs: lint
+    # DOCKERHUB_TOKEN lives in this environment, not in repository secrets - the
+    # environment predates this workflow (created 2022 alongside DOCKER_LOGIN).
+    # A job only sees environment secrets if it declares the environment, which
+    # is why the first master build failed with "Username and password required"
+    # while the credential was sitting right there. Repository secrets such as
+    # DOCKERHUB_USERNAME stay visible alongside it. No protection rules on this
+    # environment, so it adds no approval gate.
+    environment: docker_token
     steps:
       - uses: actions/checkout@v4
 
